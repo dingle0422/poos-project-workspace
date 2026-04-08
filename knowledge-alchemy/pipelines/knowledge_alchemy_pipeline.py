@@ -57,6 +57,64 @@ class KnowledgeAlchemyPipeline:
         self.abstractioner = AbstractionAgent()
         self.synthesizer = SynthesisAgent()
         self.editor = EditorAgent()
+        self._embedder = None
+
+    def _deduplicate_units(self, units: list[KnowledgeUnit],
+                           similarity_threshold: float = 0.90) -> tuple[list[KnowledgeUnit], int]:
+        """基于语义向量相似度对知识单元去重合并
+
+        Args:
+            units: 知识单元列表
+            similarity_threshold: 超过此相似度视为重复（默认0.90）
+
+        Returns:
+            (去重后的单元列表, 合并的重复单元数量)
+        """
+        if len(units) <= 1:
+            return units, 0
+
+        try:
+            from utils.embedder import Embedder
+            if self._embedder is None:
+                self._embedder = Embedder()
+
+            texts = [f"{u.original_q} {u.original_a}" for u in units]
+            vectors = self._embedder.encode(texts)
+
+            groups = self._embedder.deduplicate_by_similarity(
+                texts, similarity_threshold=similarity_threshold
+            )
+
+            # 用第一篇文章代表该组，合并被重复的原始单元信息
+            merged_units = []
+            total_removed = 0
+            for representative_text, group_indices in groups:
+                # 找到对应的 KnowledgeUnit
+                rep_idx = texts.index(representative_text)
+                rep_unit = units[rep_idx]
+
+                # 合并同组其他单元的信息（追加 tags）
+                for idx in group_indices[1:]:
+                    other = units[idx]
+                    # 合并 tags（去重）
+                    new_tags = list(set(rep_unit.tags + other.tags))
+                    rep_unit.tags = new_tags
+                    # 追加 authority（去重）
+                    if other.authority:
+                        auth_str = str(other.authority)
+                        curr_str = str(rep_unit.authority)
+                        if auth_str and auth_str not in curr_str:
+                            rep_unit.authority = f"{curr_str}; {auth_str}" if curr_str else auth_str
+                    total_removed += 1
+
+                merged_units.append(rep_unit)
+
+            return merged_units, total_removed
+
+        except Exception as e:
+            # embedder 出问题不影响主流程，降级处理
+            print(f"  ⚠️ 去重失败（{e}），跳过去重步骤")
+            return units, 0
 
     def run(self, qa_pairs: list[dict],
             domain: str = "通用",
@@ -88,11 +146,18 @@ class KnowledgeAlchemyPipeline:
             units = self.deconstructor.extract_and_atomize(qa, self.llm_config)
             all_units.extend(units)
 
-        print(f"  → 提取了 {len(all_units)} 个知识单元")
+        print(f"  → 提取了 {len(all_units)} 个知识单元（去重前）")
+
+        # ---------- 去重：基于语义相似度合并重复单元 ----------
+        print(f"  执行去重...")
+        all_units, dup_count = self._deduplicate_units(all_units)
+        print(f"  → 去重完成，合并了 {dup_count} 个重复单元，剩余 {len(all_units)} 个")
+
         stages["deconstruction"] = {
             "qa_pairs_processed": len(decon_qa_pairs),
             "knowledge_units": [_json_safe(dict(u)) for u in all_units],
-            "units_count": len(all_units)
+            "units_count": len(all_units),
+            "duplicates_removed": dup_count
         }
 
         if stop_at_stage == 1:
