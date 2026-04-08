@@ -2,6 +2,7 @@
 
 from typing import TypedDict
 from utils.config import LLMConfig
+import json
 
 
 class LayeredContent(TypedDict):
@@ -13,9 +14,9 @@ class LayeredContent(TypedDict):
 
 class CrossReferences(TypedDict):
     """交叉引用结构"""
-    glossary: dict[str, str]          # 术语表 {术语: 定义}
-    index: list[str]                  # 索引词列表
-   跳转链接: dict[str, str]           # 章节跳转 {源: 目标}
+    glossary: dict[str, str]      # 术语表 {术语: 定义}
+    index: list[str]             # 索引词列表
+    跳转链接: dict[str, str]     # 章节跳转 {源: 目标}
 
 
 class EditorAgent:
@@ -124,8 +125,8 @@ L3 疑难穿插层：将原始的典型问答对作为"案例链接"或"深度�
             user=self.CROSS_REF_PROMPT.format(content=content)
         )
 
-        import json, re
         # 尝试从响应中提取JSON
+        import re
         json_match = re.search(r"\{[\s\S]*\}", response)
         if json_match:
             try:

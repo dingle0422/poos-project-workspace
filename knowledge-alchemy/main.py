@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from pipelines.knowledge_alchemy_pipeline import KnowledgeAlchemyPipeline
 from examples.sample_qa import SAMPLE_QA_PAIRS
-from utils.config import LLMConfig
+from utils.config import LLMConfig, AlchemyConfig
 
 
 def parse_args():
@@ -69,25 +69,56 @@ def load_input(path: str) -> list[dict]:
     return data
 
 
+def _find_set(obj, path=""):
+    """递归查找包含 set 的字段"""
+    if isinstance(obj, set):
+        print(f"  [找到set] 路径: {path}, 内容: {obj}")
+        return True
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if _find_set(v, f"{path}.{k}"):
+                return True
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            if _find_set(v, f"{path}[{i}]"):
+                return True
+    return False
+
+
 def save_output(result: dict, output_dir: str):
     """保存输出结果"""
     os.makedirs(output_dir, exist_ok=True)
 
+    # 先诊断是否有 set
+    print("  [诊断] 检查 result 中是否有 set...")
+    _find_set(result, "result")
+
+    def sets_to_lists(obj):
+        if isinstance(obj, set):
+            return [sets_to_lists(item) for item in obj]
+        if isinstance(obj, dict):
+            return {k: sets_to_lists(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [sets_to_lists(item) for item in obj]
+        return obj
+
+    result_safe = sets_to_lists(result)
+
     # 保存完整结果
     with open(f"{output_dir}/textbook.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+        json.dump(result_safe, f, ensure_ascii=False, indent=2)
 
     # 保存各阶段中间结果
     if "stages" in result:
         for stage_name, stage_data in result["stages"].items():
             stage_file = f"{output_dir}/stage_{stage_name}.json"
             with open(stage_file, "w", encoding="utf-8") as f:
-                json.dump(stage_data, f, ensure_ascii=False, indent=2)
+                json.dump(sets_to_lists(stage_data), f, ensure_ascii=False, indent=2)
 
     # 保存评价指标
     if "metrics" in result:
         with open(f"{output_dir}/metrics.json", "w", encoding="utf-8") as f:
-            json.dump(result["metrics"], f, ensure_ascii=False, indent=2)
+            json.dump(sets_to_lists(result["metrics"]), f, ensure_ascii=False, indent=2)
 
 
 def print_result_summary(result: dict, metrics: dict, verbose: bool = False):
@@ -147,7 +178,10 @@ def main():
     print(f"   加载问答对: {len(qa_pairs)}条")
 
     # 2. 初始化LLM配置
-    llm_config = LLMConfig.from_env(default_model=args.model)
+    alchemy_config = AlchemyConfig.from_env()
+    if args.model:
+        alchemy_config.llm.model = args.model
+    llm_config = alchemy_config.llm
 
     # 3. 初始化流水线
     pipeline = KnowledgeAlchemyPipeline(llm_config)

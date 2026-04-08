@@ -126,7 +126,15 @@ class LLMClient:
             kwargs["temperature"] = self._config.temperature
 
         response = self._client.messages.create(**kwargs)
-        return response.content[0].text if response.content else ""
+        # MiniMax M2.7 可能返回 ThinkingBlock（推理块）和 TextBlock
+        # 需要找第一个 TextBlock 的内容
+        if not response.content:
+            return ""
+        for block in response.content:
+            # 跳过 thinking 块，只取 text 块
+            if hasattr(block, "type") and block.type == "text":
+                return block.text
+        return ""
 
     # ------------------------------------------------------------------
     # JSON 提取

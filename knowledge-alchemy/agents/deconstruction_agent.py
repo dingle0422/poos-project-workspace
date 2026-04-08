@@ -3,7 +3,7 @@
 负责将非结构化的问答对转化为可被机器处理的"知识元数据"。
 """
 
-from typing import Typed, Optional
+from typing import Optional
 from schemas.knowledge_unit import KnowledgeUnit, QAPair
 from utils.config import LLMConfig
 from utils.embedder import Embedder

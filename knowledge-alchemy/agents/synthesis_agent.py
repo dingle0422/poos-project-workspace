@@ -228,7 +228,7 @@ class SynthesisAgent:
             system="你是一位严格的知识审计员，负责识别知识体系中的空白。用JSON格式输出。",
             user=self.GAP_ANALYSIS_PROMPT.format(
                 outline_chapters=json.dumps(all_chapters, ensure_ascii=False, indent=2),
-                covered_chapters=json.dumps(covered_set, ensure_ascii=False, indent=2),
+                covered_chapters=json.dumps(list(covered_set), ensure_ascii=False, indent=2),
                 knowledge_points=points_str
             )
         )

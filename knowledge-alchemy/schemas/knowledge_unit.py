@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
+import dataclasses
 from enum import Enum
 from typing import Any
 
@@ -35,17 +36,34 @@ class KnowledgeUnit:
 
     五要素模型: scenario + pain_point + trigger + actors + authority
     """
-    scenario: str          # 业务场景，如"跨境电商退货"
-    pain_point: str        # 用户痛点，如"退货运费由谁承担"
-    trigger: str           # 触发条件，如"买家签收后7天内"
-    actors: list[str]      # 涉及主体，如["买家", "卖家", "平台"]
-    authority: str         # 合规依据，如"《电商法》第25条"
-    tags: list[str]        # 语义标签，如["退货", "运费", "售后"]
-    content: str           # 保留的原始内容（用于溯源）
-    source_qa_id: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    cluster_id: str = ""   # 语义聚类后的簇编号
+    original_q: str = ""      # 原始问题
+    original_a: str = ""       # 原始回答
+    key_concept: str = ""      # 核心概念（3-5字）
+    scope: str = ""            # 知识单元的范围边界
+    scenario: str = ""         # 业务场景
+    pain_point: str = ""       # 用户痛点
+    trigger: str = ""          # 触发条件
+    actors: list[str] = field(default_factory=list)    # 涉及主体
+    authority: str = ""        # 合规依据
+    tags: list[str] = field(default_factory=list)      # 语义标签
+    source: str = ""           # 来源
+    cluster_id: str = ""       # 语义聚类后的簇编号
     embedding: list[float] = field(default_factory=list, repr=False)
+
+    def __post_init__(self):
+        # 提供 dict() 支持：把所有字段变成字典
+        pass
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def keys(self):
+        return [f.name for f in dataclasses.fields(self)]
+
+    def __iter__(self):
+        for f in dataclasses.fields(self):
+            yield f.name, getattr(self, f.name)
 
 
 @dataclass

@@ -7,13 +7,31 @@ Stage 3: Synthesis - 知识补全与系统合成
 Stage 4: Layering - 层级化编排与润色
 """
 
-from typing import Optional
+from typing import Optional, Any
+import dataclasses
+
 from schemas.knowledge_unit import KnowledgeUnit, QAPair
 from agents.deconstruction_agent import DeconstructionAgent
 from agents.abstraction_agent import AbstractionAgent
 from agents.synthesis_agent import SynthesisAgent
 from agents.editor_agent import EditorAgent
 from utils.config import LLMConfig
+
+
+def _json_safe(obj: Any) -> Any:
+    """将Python对象递归转换为JSON安全的格式（set -> list等）"""
+    if isinstance(obj, set):
+        return [_json_safe(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(item) for item in obj]
+    if isinstance(obj, tuple):
+        return [_json_safe(item) for item in obj]
+    # 处理 dataclass 实例
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _json_safe(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+    return obj
 
 
 class KnowledgeAlchemyPipeline:
@@ -57,7 +75,12 @@ class KnowledgeAlchemyPipeline:
 
         # ========== Stage 1: Deconstruction ==========
         print("\n[Stage 1/4] 🔍 去噪与结构化标签...")
-        decon_qa_pairs = [QAPair(**qa) for qa in qa_pairs]
+        # 只传递 QAPair 支持的字段
+        valid_qa_fields = {"question", "answer", "source", "metadata", "id"}
+        decon_qa_pairs = [
+            QAPair(**{k: v for k, v in qa.items() if k in valid_qa_fields})
+            for qa in qa_pairs
+        ]
 
         all_units = []
         for i, qa in enumerate(decon_qa_pairs):
@@ -68,7 +91,7 @@ class KnowledgeAlchemyPipeline:
         print(f"  → 提取了 {len(all_units)} 个知识单元")
         stages["deconstruction"] = {
             "qa_pairs_processed": len(decon_qa_pairs),
-            "knowledge_units": [dict(u) for u in all_units],
+            "knowledge_units": [_json_safe(dict(u)) for u in all_units],
             "units_count": len(all_units)
         }
 
@@ -113,7 +136,7 @@ class KnowledgeAlchemyPipeline:
         print(f"  → 大纲包含 {len(outline['chapters'])} 章")
 
         # 知识映射
-        units_as_dicts = [dict(u) for u in all_units]
+        units_as_dicts = [_json_safe(dict(u)) for u in all_units]
         mapping = self.synthesizer.knowledge_mapping(outline, units_as_dicts, self.llm_config)
 
         # 空白识别
@@ -208,7 +231,7 @@ class KnowledgeAlchemyPipeline:
         print(f"  → 生成 {len(final_chapters)} 个章节")
         print("\n✅ 四阶段流水线执行完成！")
 
-        return stages
+        return _json_safe(stages)
 
     def evaluate(self, result: dict) -> dict:
         """评价流水线输出质量
