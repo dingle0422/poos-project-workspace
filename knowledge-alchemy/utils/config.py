@@ -1,7 +1,7 @@
 """全局配置管理。
 
 通过环境变量或直接赋值配置 LLM 后端和各阶段参数。
-支持 OpenAI / Anthropic 两种 Provider,运行时按需切换。
+支持 OpenAI / Anthropic / MiniMax 三种 Provider，运行时按需切换。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any
 class LLMProvider(str, Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    MINIMAX = "minimax"
 
 
 @dataclass
@@ -31,8 +32,19 @@ class LLMConfig:
         if not self.api_key:
             if self.provider == LLMProvider.OPENAI:
                 self.api_key = os.getenv("OPENAI_API_KEY", "")
-            else:
+            elif self.provider == LLMProvider.ANTHROPIC:
                 self.api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            else:
+                self.api_key = os.getenv("MINIMAX_API_KEY", "")
+
+    def call_llm(self, system: str, user: str) -> str:
+        """直接调用 LLM，返回文本。"""
+        from .llm_client import LLMClient
+        client = LLMClient(self)
+        return client.chat([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ])
 
 
 @dataclass
@@ -76,22 +88,26 @@ class AlchemyConfig:
     @classmethod
     def from_env(cls) -> AlchemyConfig:
         """从环境变量快速构建配置。"""
-        provider_str = os.getenv("KA_LLM_PROVIDER", "openai").lower()
-        provider = (
-            LLMProvider.ANTHROPIC
-            if provider_str == "anthropic"
-            else LLMProvider.OPENAI
-        )
+        provider_str = os.getenv("KA_LLM_PROVIDER", "minimax").lower()
+        if provider_str == "anthropic":
+            provider = LLMProvider.ANTHROPIC
+        elif provider_str == "openai":
+            provider = LLMProvider.OPENAI
+        else:
+            provider = LLMProvider.MINIMAX
+
         model_default = (
             "claude-sonnet-4-20250514" if provider == LLMProvider.ANTHROPIC
+            else "MiniMax-M2.7" if provider == LLMProvider.MINIMAX
             else "gpt-4o"
         )
+
         return cls(
             llm=LLMConfig(
                 provider=provider,
                 model=os.getenv("KA_LLM_MODEL", model_default),
                 temperature=float(os.getenv("KA_TEMPERATURE", "0.3")),
-                max_tokens=int(os.getenv("KA_MAX_TOKENS", "4096")),
+                max_tokens=int(os.getenv("KA_MAX_TOKENS", "8192")),
                 base_url=os.getenv("KA_BASE_URL"),
             ),
             domain=os.getenv("KA_DOMAIN", "通用行业"),

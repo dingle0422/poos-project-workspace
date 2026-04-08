@@ -1,4 +1,4 @@
-"""统一 LLM 调用客户端，支持 OpenAI 和 Anthropic 两种后端。
+"""统一 LLM 调用客户端，支持 OpenAI / Anthropic / MiniMax 三种后端。
 
 根据 LLMConfig.provider 自动选择对应的 SDK 进行调用，
 对外暴露统一的 chat / chat_json 接口，屏蔽底层差异。
@@ -17,9 +17,12 @@ logger = logging.getLogger(__name__)
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
 
+# MiniMax Anthropic-compatible API 端点
+MINIMAX_BASE_URL = "https://api.minimaxi.com/anthropic"
+
 
 class LLMClient:
-    """统一的 LLM 调用封装，支持 OpenAI / Anthropic 双后端。"""
+    """统一的 LLM 调用封装，支持 OpenAI / Anthropic / MiniMax 三后端。"""
 
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
@@ -43,42 +46,45 @@ class LLMClient:
             if self._config.base_url:
                 kwargs["base_url"] = self._config.base_url
             self._client = OpenAI(**kwargs)
-        else:
+
+        elif self._config.provider == LLMProvider.ANTHROPIC:
             try:
                 import anthropic
             except ImportError as exc:
                 raise ImportError(
                     "请安装 anthropic 包: pip install anthropic",
                 ) from exc
-            self._client = anthropic.Anthropic(api_key=self._config.api_key)
+            kwargs: dict[str, Any] = {"api_key": self._config.api_key}
+            if self._config.base_url:
+                kwargs["base_url"] = self._config.base_url
+            self._client = anthropic.Anthropic(**kwargs)
+
+        elif self._config.provider == LLMProvider.MINIMAX:
+            # MiniMax 使用 Anthropic 兼容格式
+            try:
+                import anthropic
+            except ImportError as exc:
+                raise ImportError(
+                    "请安装 anthropic 包: pip install anthropic",
+                ) from exc
+            kwargs: dict[str, Any] = {
+                "api_key": self._config.api_key,
+                "base_url": self._config.base_url or MINIMAX_BASE_URL,
+            }
+            self._client = anthropic.Anthropic(**kwargs)
 
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
 
     def chat(self, messages: list[dict[str, str]]) -> str:
-        """发送聊天消息，返回纯文本回复。
-
-        Args:
-            messages: OpenAI 格式的消息列表，
-                      每条消息包含 role 和 content 字段。
-
-        Returns:
-            模型生成的文本内容。
-        """
+        """发送聊天消息，返回纯文本回复。"""
         if self._config.provider == LLMProvider.OPENAI:
             return self._chat_openai(messages)
         return self._chat_anthropic(messages)
 
     def chat_json(self, messages: list[dict[str, str]]) -> Any:
-        """发送聊天消息，自动解析返回的 JSON。
-
-        若模型输出包含 ```json ... ``` 代码块，
-        则只提取代码块内的内容进行解析。
-
-        Raises:
-            json.JSONDecodeError: 当模型输出无法解析为合法 JSON 时。
-        """
+        """发送聊天消息，自动解析返回的 JSON。"""
         text = self.chat(messages)
         return self._extract_json(text)
 
@@ -96,7 +102,7 @@ class LLMClient:
         return response.choices[0].message.content or ""
 
     # ------------------------------------------------------------------
-    # Anthropic 后端
+    # Anthropic / MiniMax 后端（共用）
     # ------------------------------------------------------------------
 
     def _chat_anthropic(self, messages: list[dict[str, str]]) -> str:
@@ -116,6 +122,8 @@ class LLMClient:
         }
         if system_msg:
             kwargs["system"] = system_msg
+        if self._config.temperature:
+            kwargs["temperature"] = self._config.temperature
 
         response = self._client.messages.create(**kwargs)
         return response.content[0].text if response.content else ""
@@ -126,11 +134,7 @@ class LLMClient:
 
     @staticmethod
     def _extract_json(text: str) -> Any:
-        """从模型输出中提取并解析 JSON。
-
-        优先匹配 ```json``` 代码块；若无代码块则直接尝试
-        解析整段文本。
-        """
+        """从模型输出中提取并解析 JSON。"""
         match = _JSON_BLOCK_RE.search(text)
         if match:
             return json.loads(match.group(1).strip())
