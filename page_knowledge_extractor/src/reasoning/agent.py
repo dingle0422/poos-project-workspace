@@ -1,273 +1,318 @@
-"""
-REACT 子智能体 - 单个知识探索智能体
-"""
+"""单个 REACT 子智能体：负责在知识树中渐进式探索，回答问题。"""
 
-import os
+from __future__ import annotations
+
 import json
-from typing import Optional, Literal
 from dataclasses import dataclass, field
-from anthropic import Anthropic
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+import anthropic
+
+
+class ActionType(str, Enum):
+    EXPLORE = "explore"       # 向下探索子目录
+    BACKTRACK = "backtrack"   # 回溯到上游目录
+    ANSWER = "answer"         # 给出最终答案
+    STUCK = "stuck"           # 无法找到相关信息
 
 
 @dataclass
 class ReactStep:
-    """REACT 推理步骤"""
-    thought: str          # 思考过程
-    action: str           # 执行的动作 (disclose|reasoning|finish|backtrack)
-    target_dir: Optional[str] = None  # 目标目录（disclose/backtrack时）
-    evidence: Optional[str] = None    # 证据（finish时）
-    answer: Optional[str] = None      # 最终答案（finish时）
-    sub_paths: list[str] = field(default_factory=list)  # 并行探索的子路径
+    """一轮 REACT 循环的记录。"""
+    round_num: int
+    current_path: str
+    thought: str
+    action: ActionType
+    action_detail: dict[str, Any]
+    observation: str = ""
+
+
+@dataclass
+class AgentResult:
+    """子智能体的最终结果。"""
+    agent_id: str
+    question: str
+    answer: str
+    confidence: float
+    evidence: list[str]
+    steps: list[ReactStep]
+    status: str = "success"
 
 
 @dataclass
 class ReactAgent:
-    """单个 REACT 推理智能体"""
-    
-    # 状态
-    current_dir: str                    # 当前所在目录
-    knowledge_dir: str                  # 知识库根目录
-    question: str                       # 当前问题
-    max_rounds: int = 5                 # 最大推理轮次
-    
-    # 内部状态
-    _history: list[ReactStep] = field(default_factory=list)
-    _client: Optional[Anthropic] = field(default=None, repr=False)
-    
-    # 回调（由外部设置）
-    on_disclose: callable = None        # 披露knowledge.md时的回调
-    on_spawn_child: callable = None    # 派生子智能体时的回调
-    
-    ANTHROPIC_API_KEY = "sk-ant-api03-placeholder"  # 占位，运行时替换
-    
+    """REACT 推理子智能体。
+
+    每个 agent 从指定目录开始，逐层读取 knowledge.md，
+    判断信息相关性和颗粒度是否足够，决定向下探索或回溯。
+    """
+    agent_id: str
+    question: str
+    knowledge_root: Path
+    start_dir: Path
+    max_rounds: int = 5
+    model: str = "claude-sonnet-4-20250514"
+    client: anthropic.Anthropic | None = None
+    steps: list[ReactStep] = field(default_factory=list)
+
     def __post_init__(self):
-        self._client = Anthropic(api_key=self.ANthropIC_API_KEY)
-    
-    def set_api_key(self, api_key: str):
-        """设置 API Key"""
-        self._client = Anthropic(api_key=api_key)
-    
-    @property
-    def history(self) -> list[ReactStep]:
-        return self._history
-    
-    @property
-    def parent_tree(self) -> list[str]:
-        """获取父目录树路径"""
-        parts = []
-        current = self.current_dir
-        root = self.knowledge_dir
-        while current and current != root:
-            parts.insert(0, os.path.basename(current))
-            current = os.path.dirname(current)
+        if self.client is None:
+            self.client = anthropic.Anthropic()
+
+    async def run(self) -> AgentResult:
+        """执行 REACT 推理循环。"""
+        current_dir = self.start_dir
+
+        for round_num in range(1, self.max_rounds + 1):
+            knowledge_content = self._read_knowledge(current_dir)
+            dir_structure = self._get_dir_structure(current_dir)
+            ancestry = self._get_ancestry_path(current_dir)
+
+            prompt = self._build_prompt(
+                round_num=round_num,
+                question=self.question,
+                current_dir=str(current_dir),
+                ancestry=ancestry,
+                knowledge_content=knowledge_content,
+                dir_structure=dir_structure,
+                history=self.steps,
+            )
+
+            response = self._call_llm(prompt)
+            decision = self._parse_decision(response)
+
+            step = ReactStep(
+                round_num=round_num,
+                current_path=str(current_dir),
+                thought=decision.get("thought", ""),
+                action=ActionType(decision.get("action", "stuck")),
+                action_detail=decision,
+            )
+
+            if step.action == ActionType.ANSWER:
+                step.observation = "推理完成，给出答案。"
+                self.steps.append(step)
+                return AgentResult(
+                    agent_id=self.agent_id,
+                    question=self.question,
+                    answer=decision.get("answer", ""),
+                    confidence=decision.get("confidence", 0.0),
+                    evidence=decision.get("evidence", []),
+                    steps=self.steps,
+                    status="success",
+                )
+
+            if step.action == ActionType.EXPLORE:
+                target_dirs = decision.get("target_dirs", [])
+                if len(target_dirs) == 1:
+                    next_dir = current_dir / target_dirs[0]
+                    if next_dir.is_dir():
+                        step.observation = f"进入子目录: {target_dirs[0]}"
+                        current_dir = next_dir
+                    else:
+                        step.observation = f"子目录不存在: {target_dirs[0]}，停留在当前层。"
+                elif len(target_dirs) > 1:
+                    # 多路探索：返回特殊结果，由 graph 层处理分叉
+                    step.observation = f"需要分叉探索 {len(target_dirs)} 个子目录"
+                    self.steps.append(step)
+                    return AgentResult(
+                        agent_id=self.agent_id,
+                        question=self.question,
+                        answer="",
+                        confidence=0.0,
+                        evidence=[],
+                        steps=self.steps,
+                        status="fork",
+                    )
+                else:
+                    step.observation = "未指定探索目标，停留在当前层。"
+
+            elif step.action == ActionType.BACKTRACK:
+                target_path = decision.get("backtrack_to", "")
+                if target_path:
+                    bt_dir = Path(target_path)
+                    if bt_dir.is_dir() and self._is_ancestor(bt_dir, self.knowledge_root):
+                        step.observation = f"回溯到: {target_path}"
+                        current_dir = bt_dir
+                    else:
+                        step.observation = f"回溯目标无效: {target_path}，停留在当前层。"
+                else:
+                    step.observation = "未指定回溯目标。"
+
+            elif step.action == ActionType.STUCK:
+                step.observation = "无法继续推理。"
+                self.steps.append(step)
+                return AgentResult(
+                    agent_id=self.agent_id,
+                    question=self.question,
+                    answer=decision.get("answer", "未找到相关信息。"),
+                    confidence=decision.get("confidence", 0.0),
+                    evidence=[],
+                    steps=self.steps,
+                    status="stuck",
+                )
+
+            self.steps.append(step)
+
+        return AgentResult(
+            agent_id=self.agent_id,
+            question=self.question,
+            answer="达到最大推理轮次，未能得出确定答案。",
+            confidence=0.0,
+            evidence=[s.observation for s in self.steps],
+            steps=self.steps,
+            status="max_rounds_reached",
+        )
+
+    def _read_knowledge(self, dir_path: Path) -> str:
+        km = dir_path / "knowledge.md"
+        if km.exists():
+            return km.read_text(encoding="utf-8")
+        return "(当前目录无 knowledge.md)"
+
+    def _get_dir_structure(self, dir_path: Path) -> list[str]:
+        if not dir_path.is_dir():
+            return []
+        return sorted(
+            d.name for d in dir_path.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+        )
+
+    def _get_ancestry_path(self, current: Path) -> list[str]:
+        """获取从知识库根到当前目录的路径链。"""
+        parts: list[str] = []
+        p = current
+        while p != self.knowledge_root and p != p.parent:
+            parts.append(p.name)
+            p = p.parent
+        parts.append(self.knowledge_root.name)
+        parts.reverse()
         return parts
-    
-    def read_knowledge_md(self, dir_path: str) -> Optional[str]:
-        """读取指定目录的 knowledge.md"""
-        file_path = os.path.join(dir_path, "knowledge.md")
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        return None
-    
-    def get_subdirs(self, dir_path: str) -> list[str]:
-        """获取子目录列表"""
-        subdirs = []
-        for item in os.listdir(dir_path):
-            item_path = os.path.join(dir_path, item)
-            if os.path.isdir(item_path):
-                subdirs.append(item)
-        return sorted(subdirs)
-    
-    def disclose_and_read(self, dir_path: str) -> tuple[Optional[str], list[str]]:
-        """披露（读取）指定目录的 knowledge.md 并返回其子目录"""
-        content = self.read_knowledge_md(dir_path)
-        subdirs = self.get_subdirs(dir_path)
-        
-        if self.on_disclose:
-            self.on_disclose(dir_path, content, subdirs)
-        
-        return content, subdirs
-    
-    def build_system_prompt(self) -> str:
-        """构建系统提示"""
-        return """你是一个专业的知识推理智能体，擅长从文档知识库中抽取证据回答用户问题。
 
-## 核心工作模式：REACT (Reasoning + Acting)
+    def _is_ancestor(self, target: Path, root: Path) -> bool:
+        try:
+            target.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
 
-你将逐步推理，每次只披露（读取）一层目录的 knowledge.md 内容，然后判断：
-1. 当前层级的知识是否与问题相关？
-2. 当前颗粒度是否足够支撑推理？
-3. 如果不够，应该探索哪些子目录？
+    def _build_prompt(
+        self,
+        round_num: int,
+        question: str,
+        current_dir: str,
+        ancestry: list[str],
+        knowledge_content: str,
+        dir_structure: list[str],
+        history: list[ReactStep],
+    ) -> str:
+        history_text = ""
+        if history:
+            entries = []
+            for s in history:
+                entries.append(
+                    f"  第{s.round_num}轮: [{s.action.value}] {s.thought} -> {s.observation}"
+                )
+            history_text = "\n".join(entries)
 
-## 向下披露规则
-- 每次只向下一层，不能跳跃
-- 可以选择多个子路径并行探索
-- 每次探索都是独立的 REACT 循环
+        subdirs_text = "\n".join(f"  - {d}/" for d in dir_structure) if dir_structure else "  (无子目录)"
+        ancestry_text = " > ".join(ancestry)
 
-## 向上回溯规则
-- 发现需要补充背景知识时，可以直接回溯到上游任意层级
-- 回溯后重新选择向下路径
-
-## 输出格式（JSON）
-```json
-{
-  "thought": "你的推理过程",
-  "action": "disclose|parallel_disclose|backtrack|reasoning|finish",
-  "target_dir": "目标目录名称（disclose/backtrack时）",
-  "sub_paths": ["子路径1", "子路径2"]（parallel_disclose时）,
-  "evidence": "支撑问题的证据（finish时）",
-  "answer": "最终答案（finish时）"
-}
-```
-
-## 重要原则
-- 鼓励探索，但要有针对性
-- 证据要具体，引用原文
-- 多路径并行时，分别推理后汇总"""
-
-    def build_user_prompt(self, current_content: Optional[str], subdirs: list[str], 
-                         parent_tree: list[str], round_num: int) -> str:
-        """构建用户提示"""
-        subdirs_info = "\n".join([f"- {d}" for d in subdirs]) if subdirs else "(无子目录)"
-        
-        prompt = f"""## 当前任务
-问题: {self.question}
+        return f"""你是一个知识检索推理智能体。你的任务是在层级知识库中渐进式地查找信息来回答问题。
 
 ## 当前状态
-- 当前轮次: {round_num}/{self.max_rounds}
-- 当前目录: {os.path.basename(self.current_dir)}
-- 父目录树: {' -> '.join(parent_tree) if parent_tree else '(根目录)'}"""
+- 第 {round_num}/{self.max_rounds} 轮
+- 问题: {question}
+- 当前目录: {current_dir}
+- 路径链: {ancestry_text}
 
-        if current_content:
-            prompt += f"""
-## 当前 knowledge.md 内容
-{current_content}"""
-        else:
-            prompt += """
-## 当前 knowledge.md 内容
-(未找到内容)"""
+## 当前目录的 knowledge.md 内容
+{knowledge_content}
 
-        prompt += f"""
-## 可探索的子目录
-{subdirs_info}
+## 当前目录的子目录
+{subdirs_text}
 
-请基于以上信息，输出你的推理结果（JSON格式）。
-"""
-        return prompt
-    
-    def run(self) -> ReactStep:
-        """
-        运行 REACT 推理
-        Returns: 最终的 ReactStep（包含答案和证据）
-        """
-        current_content, subdirs = self.disclose_and_read(self.current_dir)
-        
-        for round_num in range(1, self.max_rounds + 1):
-            # 构建提示
-            user_prompt = self.build_user_prompt(
-                current_content, subdirs, self.parent_tree, round_num
-            )
-            
-            # 调用 LLM
-            response = self._call_llm(user_prompt)
-            
-            # 解析响应
-            step = self._parse_response(response)
-            self._history.append(step)
-            
-            # 执行动作
-            if step.action == "finish":
-                return step
-            
-            elif step.action == "disclose":
-                if step.target_dir:
-                    target_path = os.path.join(self.current_dir, step.target_dir)
-                    if os.path.exists(target_path):
-                        self.current_dir = target_path
-                        current_content, subdirs = self.disclose_and_read(target_path)
-                    else:
-                        # 子目录不存在，尝试在同一层继续推理
-                        step.thought += f"\n[警告] 目标目录不存在: {step.target_dir}"
-            
-            elif step.action == "parallel_disclose":
-                # 返回需要并行探索的子路径，由调用者派生子智能体
-                return step
-            
-            elif step.action == "backtrack":
-                if step.target_dir:
-                    # 回溯到指定的上游目录
-                    target_path = os.path.join(self.knowledge_dir, step.target_dir)
-                    if os.path.exists(target_path):
-                        self.current_dir = target_path
-                        current_content, subdirs = self.disclose_and_read(target_path)
-                    else:
-                        step.thought += f"\n[警告] 回溯目标不存在: {step.target_dir}"
-            
-            elif step.action == "reasoning":
-                # 仅推理不披露，继续尝试向下
-                if not subdirs:
-                    # 没有更多子目录可探索，尝试完成
-                    step.action = "finish"
-                    step.answer = step.thought
-                    step.evidence = current_content or ""
-                    return step
-        
-        # 达到最大轮次，强制结束
-        final_step = ReactStep(
-            thought=f"[达到最大轮次 {self.max_rounds}] " + "\n".join([s.thought for s in self._history]),
-            action="finish",
-            evidence=current_content or "",
-            answer="基于现有知识库内容无法给出完整答案，建议扩大知识库或调整问题。"
+## 推理历史
+{history_text if history_text else "(首轮)"}
+
+## 规则
+1. 向下探索只能一层一层进行（从当前目录的直接子目录中选择）
+2. 向上回溯可以跳级（直接回到祖先目录的任一级）
+3. 如果当前 knowledge.md 的信息已足够回答问题，直接给出答案
+4. 如果需要更细粒度的信息，选择最相关的子目录向下探索
+5. 如果发现当前分支不相关，可以回溯到上游重新选择方向
+
+## 请以严格 JSON 格式返回你的决策
+
+如果要**向下探索**:
+```json
+{{
+  "thought": "当前知识不够细致，需要查看子目录 X 的详细内容",
+  "action": "explore",
+  "target_dirs": ["子目录名称1", "子目录名称2"]
+}}
+```
+
+如果要**回溯**:
+```json
+{{
+  "thought": "当前分支不相关，需要回到上级重新探索",
+  "action": "backtrack",
+  "backtrack_to": "目标目录的完整路径"
+}}
+```
+
+如果**可以回答**:
+```json
+{{
+  "thought": "已收集到足够信息",
+  "action": "answer",
+  "answer": "完整的回答内容",
+  "confidence": 0.85,
+  "evidence": ["证据1: ...", "证据2: ..."]
+}}
+```
+
+如果**无法继续**:
+```json
+{{
+  "thought": "在知识库中未找到相关信息",
+  "action": "stuck",
+  "answer": "说明为什么无法回答",
+  "confidence": 0.0
+}}
+```
+
+请返回纯 JSON，不要包含其他内容。"""
+
+    def _call_llm(self, prompt: str) -> str:
+        resp = self.client.messages.create(
+            model=self.model,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
         )
-        self._history.append(final_step)
-        return final_step
-    
-    def _call_llm(self, user_prompt: str) -> str:
-        """调用 LLM"""
+        return resp.content[0].text
+
+    def _parse_decision(self, response: str) -> dict[str, Any]:
+        text = response.strip()
+        # 提取 JSON 块
+        if "```json" in text:
+            start = text.index("```json") + 7
+            end = text.index("```", start)
+            text = text[start:end].strip()
+        elif "```" in text:
+            start = text.index("```") + 3
+            end = text.index("```", start)
+            text = text[start:end].strip()
+
         try:
-            response = self._client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=2048,
-                system=self.build_system_prompt(),
-                messages=[{"role": "user", "content": user_prompt}]
-            )
-            return response.content[0].text
-        except Exception as e:
-            return json.dumps({
-                "thought": f"API调用失败: {e}",
-                "action": "finish",
-                "answer": f"推理过程出错: {e}",
-                "evidence": ""
-            })
-    
-    def _parse_response(self, response: str) -> ReactStep:
-        """解析 LLM 响应"""
-        try:
-            # 尝试提取 JSON
-            if "```json" in response:
-                start = response.find("```json") + 7
-                end = response.find("```", start)
-                json_str = response[start:end].strip()
-            elif "```" in response:
-                start = response.find("```") + 3
-                end = response.find("```", start)
-                json_str = response[start:end].strip()
-            else:
-                json_str = response.strip()
-            
-            data = json.loads(json_str)
-            return ReactStep(
-                thought=data.get("thought", ""),
-                action=data.get("action", "reasoning"),
-                target_dir=data.get("target_dir"),
-                sub_paths=data.get("sub_paths", []),
-                evidence=data.get("evidence"),
-                answer=data.get("answer")
-            )
+            return json.loads(text)
         except json.JSONDecodeError:
-            # 解析失败，当作纯推理处理
-            return ReactStep(
-                thought=response,
-                action="reasoning"
-            )
+            return {
+                "thought": "无法解析 LLM 返回",
+                "action": "stuck",
+                "answer": f"LLM 返回格式异常: {response[:200]}",
+                "confidence": 0.0,
+            }

@@ -1,79 +1,73 @@
-# Page Knowledge Extractor
-**文档知识结构化抽取 + 渐进式披露检索框架**
+# 文档知识结构化抽取 + 渐进式披露检索框架
 
-## 功能特性
-
-### 1. 知识抽取 (extract)
-- **输入格式**: 支持 docx、txt，标题格式为标准多级序号（1 → 1.1 → 1.1.1）
-- **非标准序号处理**: 自动归入最近父级标题的 content
-- **输出结构**: 层级目录 + knowledge.md 文件
-- **目录命名**: `序号_标题名称`（如 `1.1.2_农产品免税条例`）
-- **knowledge.md 内容**:
-  - 当前文件绝对路径
-  - 本章节内容（不含子标题内容）
-  - 子目录摘要（鼓励渐进式探索）
-
-### 2. 知识推理 (reason)
-- **REACT 模式**: 每轮只披露一层 knowledge.md
-- **渐进式披露**: 从外到里层层深入
-- **多路径并行**: 可同时探索多个子路径
-- **智能回溯**: 支持跳级回溯到上游任意目录
-- **AgentGraph**: 每个问题衍生多个子智能体，形成有向无环图
-- **证据汇总**: 各子智能体推理完成后递归汇总
+将非结构化的多级标题文档自动抽取为树形知识库，并支持基于 REACT 模式的渐进式推理检索。
 
 ## 安装
 
 ```bash
-cd page_knowledge_extractor
 pip install -r requirements.txt
 ```
 
+需要设置 `ANTHROPIC_API_KEY` 环境变量（推理功能依赖 Claude API）。
+
 ## 使用方法
 
-### 抽取文档
+### 1. 知识抽取
+
+从 docx 或 txt 文档中抽取结构化知识：
 
 ```bash
-# 单文件抽取
-python3 -m src.main extract -i ./docs/农产品免税条例.docx -o ./page_knowledge
-
-# 批量抽取目录
-python3 -m src.main extract -i ./docs/ -o ./page_knowledge
+python3 -m src.main extract --input ./docs/文档.docx --output ./page_knowledge
 ```
 
-### 知识推理
+输入文档中的标准数字序号标题（如 `1.` / `1.1` / `1.1.1`）会被识别为层级结构。其他序号类型（中文序号、字母序号等）视为所在标准标题的正文内容。
+
+抽取后在 `page_knowledge/` 下生成 `{文件名}_{时间戳}/` 目录，内部按标题层级嵌套，每层包含 `knowledge.md`。
+
+### 2. 知识推理
+
+#### 单问题推理
 
 ```bash
-# 单问题推理
-python3 -m src.main reason -k ./page_knowledge/农产品免税条例_1234567890 -q "哪些农产品可以免税？"
-
-# 批量推理（CSV）
 python3 -m src.main reason \
-  -k ./page_knowledge/农产品免税条例_1234567890 \
+  --knowledge-dir ./page_knowledge/文档_1234567890 \
+  --question "你的问题"
+```
+
+#### 批量推理
+
+```bash
+python3 -m src.main reason \
+  --knowledge-dir ./page_knowledge/文档_1234567890 \
   --questions ./questions.csv \
   --question-col "问题" \
-  --output ./results.csv
-
-# 批量推理（XLSX）
-python3 -m src.main reason \
-  -k ./page_knowledge/农产品免税条例_1234567890 \
-  --questions ./questions.xlsx \
-  --question-col "问题" \
-  --max-rounds 8 \
+  --max-rounds 5 \
   --output ./results.csv
 ```
 
-## 项目结构
+## 推理机制
+
+采用 REACT（Reasoning + Acting）模式的渐进式推理：
+
+1. 从知识库根目录开始，每轮只读取当前层的 `knowledge.md`
+2. 大模型判断当前信息的相关性和颗粒度
+3. 向下探索只能逐层进行，向上回溯可以跳级
+4. 遇到多个相关子目录时，分叉出多个子智能体并行推理
+5. 所有子智能体结果递归合并，给出最终答案
+
+## 目录结构
 
 ```
 page_knowledge_extractor/
 ├── page_knowledge/           # 知识抽取输出目录
 ├── src/
 │   ├── __init__.py
+│   ├── __main__.py
 │   ├── main.py               # CLI 入口
-│   ├── extractor.py          # 抽取主逻辑
+│   ├── extractor.py          # 知识抽取主逻辑
 │   ├── parser.py             # 标题结构解析
-│   ├── file_reader.py        # 文件读取
-│   ├── knowledge_base.py     # 知识库管理
+│   ├── file_reader.py        # docx/txt 读取
+│   ├── knowledge_base.py     # 知识库文件管理
 │   └── reasoning/
 │       ├── __init__.py
 │       ├── agent.py          # REACT 子智能体
@@ -82,20 +76,3 @@ page_knowledge_extractor/
 ├── requirements.txt
 └── README.md
 ```
-
-## 依赖
-
-- python-docx >= 1.1.0
-- pandas >= 2.1.0
-- openpyxl >= 3.1.0
-- anthropic >= 0.25.0
-
-## 环境变量
-
-- `ANTHROPIC_API_KEY`: Anthropic API Key（用于推理功能）
-
-## 注意事项
-
-1. 抽取时请确保文档标题格式符合标准（数字+句点）
-2. 推理前需设置 ANTHROPIC_API_KEY 环境变量
-3. max-rounds 参数控制每个子智能体的最大推理轮次

@@ -1,77 +1,76 @@
-"""
-知识抽取器 - 将文档抽取为知识目录结构
-"""
+"""知识抽取主逻辑：读取文件 -> 解析标题 -> 构建知识目录。"""
 
-import os
+from __future__ import annotations
+
 import time
 from pathlib import Path
-from typing import Optional
-from .file_reader import FileReader
-from .parser import HeadingParser, HeadingNode
-from .knowledge_base import KnowledgeBase
+
+from .file_reader import read_file
+from .parser import parse_headings
+from .knowledge_base import build_knowledge_tree
 
 
-class Extractor:
-    """文档知识抽取器"""
+def extract(input_path: str, output_dir: str) -> Path:
+    """执行完整的知识抽取流程。
 
-    def __init__(self, output_dir: str):
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+    Args:
+        input_path: 输入文件路径（.docx 或 .txt）
+        output_dir: 输出目录（page_knowledge 目录）
 
-    def extract(self, input_path: str, file_name: Optional[str] = None) -> str:
-        """
-        抽取文档知识结构
-        Returns: 生成的独立知识目录路径
-        """
-        # 读取文件内容
-        content = FileReader.read(input_path)
+    Returns:
+        创建的知识库根目录路径
+    """
+    input_file = Path(input_path)
+    if not input_file.exists():
+        raise FileNotFoundError(f"输入文件不存在: {input_path}")
 
-        # 生成知识目录名
-        if file_name is None:
-            file_name = os.path.basename(input_path)
-        timestamp_ms = int(time.time() * 1000)
-        knowledge_dir_name = KnowledgeBase.get_knowledge_dir_name(file_name, timestamp_ms)
-        knowledge_dir = os.path.join(self.output_dir, knowledge_dir_name)
+    print(f"📖 读取文件: {input_file.name}")
+    text = read_file(input_file)
 
-        # 解析文本结构
-        roots = HeadingParser.parse_text(content)
+    if not text.strip():
+        raise ValueError(f"文件内容为空: {input_path}")
 
-        if not roots:
-            # 无标题时，创建根目录存放全文
-            os.makedirs(knowledge_dir, exist_ok=True)
-            root_node = HeadingNode(
-                number="1",
-                title=Path(file_name).stem,
-                content=content,
-                level=1
-            )
-            KnowledgeBase._create_node_dir(self.output_dir, root_node)
-            # 重命名
-            actual_dir = os.path.join(self.output_dir, root_node.folder_name)
-            if os.path.exists(actual_dir):
-                import shutil
-                new_dir = knowledge_dir
-                idx = 1
-                while os.path.exists(new_dir):
-                    new_dir = f"{knowledge_dir}_{idx}"
-                    idx += 1
-                shutil.move(actual_dir, new_dir)
-                return new_dir
-            return actual_dir
+    print(f"🔍 解析标题结构...")
+    nodes = parse_headings(text)
 
-        # 创建目录结构
-        KnowledgeBase.create_directory_structure(knowledge_dir, roots)
+    if not nodes:
+        raise ValueError("未识别到任何标准数字序号标题（如 1. / 1.1 / 1.1.1）")
 
-        return knowledge_dir
+    total_nodes = _count_nodes(nodes)
+    max_depth = _max_depth(nodes)
+    print(f"   找到 {len(nodes)} 个顶级标题，共 {total_nodes} 个节点，最大深度 {max_depth} 层")
 
-    def extract_multiple(self, input_paths: list[str]) -> list[str]:
-        """批量抽取多个文档"""
-        results = []
-        for path in input_paths:
-            try:
-                result = self.extract(path)
-                results.append(result)
-                print(f"✓ 已抽取: {path} -> {result}")
-            except Exception as e:
-                print(f"✗ 抽取失败: {path}, 错误: {e}")
-        return results
+    timestamp_ms = int(time.time() * 1000)
+    stem = input_file.stem
+    knowledge_dir_name = f"{stem}_{timestamp_ms}"
+    knowledge_root = Path(output_dir) / knowledge_dir_name
+
+    print(f"📁 构建知识目录: {knowledge_root}")
+    build_knowledge_tree(nodes, knowledge_root)
+
+    print(f"✅ 抽取完成！知识库位于: {knowledge_root}")
+    _print_tree_summary(nodes, indent=0)
+
+    return knowledge_root
+
+
+def _count_nodes(nodes: list) -> int:
+    count = 0
+    for n in nodes:
+        count += 1 + _count_nodes(n.children)
+    return count
+
+
+def _max_depth(nodes: list, current: int = 1) -> int:
+    if not nodes:
+        return current - 1
+    return max(_max_depth(n.children, current + 1) for n in nodes)
+
+
+def _print_tree_summary(nodes: list, indent: int) -> None:
+    for node in nodes:
+        prefix = "  " * indent + ("├── " if indent > 0 else "")
+        has_content = "📝" if node.content.strip() else "  "
+        child_count = f"({len(node.children)} 子节点)" if node.children else ""
+        print(f"   {prefix}{has_content} {node.number} {node.title} {child_count}")
+        _print_tree_summary(node.children, indent + 1)

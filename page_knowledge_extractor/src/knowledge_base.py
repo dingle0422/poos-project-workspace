@@ -1,112 +1,95 @@
-"""
-知识库管理器 - 管理 knowledge.md 文件的创建和写入
-"""
+"""知识库文件管理：根据解析树创建目录结构，写入 knowledge.md。"""
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
-from .parser import HeadingNode, HeadingParser
+
+from .parser import HeadingNode
 
 
-class KnowledgeBase:
-    """知识库管理器"""
+def build_knowledge_tree(nodes: list[HeadingNode], output_dir: Path) -> None:
+    """递归创建知识目录结构并写入 knowledge.md。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    KNOWLEDGE_FILE = "knowledge.md"
+    for node in nodes:
+        _write_node(node, output_dir)
 
-    @staticmethod
-    def create_directory_structure(root_path: str, nodes: list[HeadingNode]) -> None:
-        """
-        创建知识目录结构
-        """
-        os.makedirs(root_path, exist_ok=True)
-        for node in nodes:
-            KnowledgeBase._create_node_dir(root_path, node)
 
-    @staticmethod
-    def _create_node_dir(parent_path: str, node: HeadingNode) -> None:
-        """递归创建节点目录"""
-        # 创建当前节点目录
-        node_dir = os.path.join(parent_path, node.folder_name)
-        os.makedirs(node_dir, exist_ok=True)
+def _write_node(node: HeadingNode, parent_dir: Path) -> None:
+    node_dir = parent_dir / node.folder_name
+    node_dir.mkdir(parents=True, exist_ok=True)
 
-        # 写入当前节点的 knowledge.md
-        KnowledgeBase._write_knowledge_md(node_dir, node)
+    for child in node.children:
+        _write_node(child, node_dir)
 
-        # 递归处理子节点
-        for child in node.children:
-            KnowledgeBase._create_node_dir(node_dir, child)
+    _write_knowledge_md(node, node_dir)
 
-    @staticmethod
-    def _write_knowledge_md(node_dir: str, node: HeadingNode) -> None:
-        """写入 knowledge.md 文件"""
-        file_path = os.path.join(node_dir, KnowledgeBase.KNOWLEDGE_FILE)
-        
-        # 构建内容
-        lines = [
-            f"# {node.number} {node.title}\n",
-            f"**文件路径**: {node_dir}\n",
-            f"\n## 本章节内容\n",
-            f"{node.content if node.content else '(无正文内容)'}\n",
-        ]
 
-        # 添加子文件夹摘要
-        if node.children:
-            lines.append("\n## 子目录摘要\n")
-            lines.append("> 以下为子文件夹内容摘要，具体细节可能遗漏，建议按需打开子文件夹内的 knowledge.md 渐进式探索。\n")
-            for child in node.children:
-                lines.append(f"### {child.folder_name}\n")
-                lines.append(f"- **序号**: {child.number}\n")
-                lines.append(f"- **标题**: {child.title}\n")
-                lines.append(f"- **内容摘要**: {child.content[:200]}..." if len(child.content) > 200 else f"- **内容摘要**: {child.content}\n")
-                lines.append(f"- **子节点数**: {len(child.children)}\n")
-                lines.append("\n")
+def _write_knowledge_md(node: HeadingNode, node_dir: Path) -> None:
+    abs_path = os.path.abspath(node_dir)
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.writelines(lines)
+    own_content = _extract_own_content(node)
+    child_summaries = _build_child_summaries(node)
 
-    @staticmethod
-    def read_knowledge_md(dir_path: str) -> Optional[str]:
-        """读取指定目录的 knowledge.md"""
-        file_path = os.path.join(dir_path, KnowledgeBase.KNOWLEDGE_FILE)
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        return None
+    sections: list[str] = []
 
-    @staticmethod
-    def get_subdirs(dir_path: str) -> list[str]:
-        """获取指定目录下的所有子文件夹（按名称排序）"""
-        subdirs = []
-        for item in os.listdir(dir_path):
-            item_path = os.path.join(dir_path, item)
-            if os.path.isdir(item_path):
-                subdirs.append(item)
-        return sorted(subdirs)
+    sections.append(f"# {node.number} {node.title}\n")
+    sections.append(f"**路径:** `{abs_path}`\n")
 
-    @staticmethod
-    def get_dir_number(dir_name: str) -> Optional[str]:
-        """从文件夹名称提取序号部分"""
-        # 文件夹格式: "1.1.2_标题名"
-        parts = dir_name.split('_', 1)
-        if parts:
-            return parts[0]
-        return None
+    if own_content.strip():
+        sections.append("## 本节内容\n")
+        sections.append(own_content.strip())
+        sections.append("")
 
-    @staticmethod
-    def get_parent_dirs(knowledge_dir: str) -> list[str]:
-        """获取从根目录到当前目录的完整路径列表"""
-        current = knowledge_dir
-        parents = []
-        while True:
-            parent = os.path.dirname(current)
-            if parent == current:
-                break
-            parents.insert(0, os.path.basename(current))
-            current = parent
-        return parents
+    if child_summaries:
+        sections.append("## 子目录概览\n")
+        sections.append("> 以下为子章节摘要，详细内容请打开对应子目录的 knowledge.md 进行渐进式探索。\n")
+        for summary in child_summaries:
+            sections.append(summary)
 
-    @staticmethod
-    def get_knowledge_dir_name(file_name: str, timestamp_ms: int) -> str:
-        """生成知识目录名称：文件名_毫秒时间戳"""
-        name = Path(file_name).stem
-        return f"{name}_{timestamp_ms}"
+    md_path = node_dir / "knowledge.md"
+    md_path.write_text("\n".join(sections), encoding="utf-8")
+
+
+def _extract_own_content(node: HeadingNode) -> str:
+    """提取本级标题下除子标题内容外的正文。
+
+    parser 已在 content 字段中保留本级正文（不含子级段落的文本），
+    直接返回即可。
+    """
+    return node.content
+
+
+def _build_child_summaries(node: HeadingNode) -> list[str]:
+    summaries: list[str] = []
+    for child in node.children:
+        summary_text = _generate_summary(child)
+        entry = f"### 📂 `{child.folder_name}/`\n\n{summary_text}\n"
+        summaries.append(entry)
+    return summaries
+
+
+def _generate_summary(node: HeadingNode, max_chars: int = 300) -> str:
+    """为子节点生成内容摘要。
+
+    策略：取本级 content 的前 max_chars 字符作为摘要，
+    并附上其直接子标题列表作为结构提示。
+    """
+    parts: list[str] = []
+
+    content = node.content.strip()
+    if content:
+        truncated = content[:max_chars]
+        if len(content) > max_chars:
+            truncated += "……"
+        parts.append(truncated)
+
+    if node.children:
+        child_names = [f"`{c.folder_name}/`" for c in node.children]
+        parts.append(f"包含子章节: {', '.join(child_names)}")
+
+    if not parts:
+        parts.append(f"标题: {node.number} {node.title}")
+
+    return "\n\n".join(parts)

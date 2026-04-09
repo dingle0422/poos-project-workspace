@@ -1,54 +1,37 @@
-"""
-文件读取器 - 支持 docx 和 txt 格式
-"""
+"""读取 docx 和 txt 文件，返回纯文本内容。"""
 
-import os
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional
+
+from docx import Document
 
 
-class FileReader:
-    """文件读取基类"""
+def read_file(path: str | Path) -> str:
+    path = Path(path)
+    suffix = path.suffix.lower()
 
-    @staticmethod
-    def read(path: str) -> str:
-        """根据文件扩展名调用对应读取方法"""
-        ext = Path(path).suffix.lower()
-        if ext == '.docx':
-            return FileReader.read_docx(path)
-        elif ext == '.txt':
-            return FileReader.read_txt(path)
-        else:
-            raise ValueError(f"不支持的文件格式: {ext}")
+    if suffix == ".docx":
+        return _read_docx(path)
+    elif suffix == ".txt":
+        return _read_txt(path)
+    else:
+        raise ValueError(f"不支持的文件类型: {suffix}，仅支持 .docx 和 .txt")
 
 
-    @staticmethod
-    def read_docx(path: str) -> str:
-        """读取 docx 文件"""
+def _read_docx(path: Path) -> str:
+    doc = Document(str(path))
+    lines: list[str] = []
+    for para in doc.paragraphs:
+        lines.append(para.text)
+    return "\n".join(lines)
+
+
+def _read_txt(path: Path) -> str:
+    encodings = ["utf-8", "gbk", "gb2312", "utf-16", "latin-1"]
+    for enc in encodings:
         try:
-            from docx import Document
-        except ImportError:
-            raise ImportError("请安装 python-docx: pip install python-docx")
-
-        doc = Document(path)
-        paragraphs = []
-
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if text:
-                paragraphs.append(text)
-
-        return '\n'.join(paragraphs)
-
-
-    @staticmethod
-    def read_txt(path: str) -> str:
-        """读取 txt 文件"""
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
-
-
-    @staticmethod
-    def get_supported_extensions() -> list[str]:
-        """获取支持的文件扩展名"""
-        return ['.docx', '.txt']
+            return path.read_text(encoding=enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    raise ValueError(f"无法解码文件 {path}，已尝试编码: {encodings}")
